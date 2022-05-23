@@ -1,51 +1,49 @@
 from model import get_model
-from eval import get_evaluator
-from dataset import get_dataset, get_dataloader
-from utils import Checkpointer
+import h5py
+import numpy as np
 import os
-import os.path as osp
+import torch
 from torch import nn
 
-def eval(cfg):
-    assert cfg.resume
-    assert cfg.eval.checkpoint in ['best', 'last']
-    assert cfg.eval.metric in ['ap_dot5', 'ap_avg']
-    
-    print('Experiment name:', cfg.exp_name)
-    print('Dataset:', cfg.dataset)
-    print('Model name:', cfg.model)
-    print('Resume:', cfg.resume)
-    if cfg.resume:
-        print('Checkpoint:', cfg.resume_ckpt if cfg.resume_ckpt else 'see below')
-    print('Using device:', cfg.device)
-    if 'cuda' in cfg.device:
-        print('Using parallel:', cfg.parallel)
-    if cfg.parallel:
-        print('Device ids:', cfg.device_ids)
-    
-    print('Loading data')
-    testset = get_dataset(cfg, 'test')
-    model = get_model(cfg)
-    model = model.to(cfg.device)
-    checkpointer = Checkpointer(osp.join(cfg.checkpointdir, cfg.exp_name), max_num=cfg.train.max_ckpt)
-    evaluator = get_evaluator(cfg)
-    model.eval()
 
-    use_cpu = 'cpu' in cfg.device
-    if cfg.resume_ckpt:
-        checkpoint = checkpointer.load(cfg.resume_ckpt, model, None, None, use_cpu)
-    elif cfg.eval.checkpoint == 'last':
-        checkpoint = checkpointer.load_last('', model, None, None, use_cpu)
-    elif cfg.eval.checkpoint == 'best':
-        checkpoint = checkpointer.load_best(cfg.eval.metric, model, None, None, use_cpu)
-    if cfg.parallel:
-        assert 'cpu' not in cfg.device
-        model = nn.DataParallel(model, device_ids=cfg.device_ids)
-        
-    evaldir = osp.join(cfg.evaldir, cfg.exp_name)
-    info = {
-        'exp_name': cfg.exp_name
-    }
-    evaluator.test_eval(model, testset, testset.bb_path, cfg.device, evaldir, info)
-        
-    
+def eval(cfg, data_loaders, config):
+    def get_path_detail():
+        return os.path.join(config['folder_out'], '{}.h5'.format(phase))
+    for phase in data_loaders:
+        path_detail = get_path_detail()
+        if os.path.exists(path_detail):
+            raise FileExistsError(path_detail)
+    path_model = os.path.join(config['folder_out'], config['file_model'])
+    model = get_model(cfg, config)
+    model = nn.DataParallel(model.cuda())
+    model.load_state_dict(torch.load(path_model))
+    model.train(False)
+    for phase in data_loaders:
+        path_detail = get_path_detail()
+        results_all = {}
+        for data in data_loaders[phase]:
+            results = {}
+            for idx_run in range(config['num_tests']):
+                with torch.set_grad_enabled(False):
+                    sub_results, _, _ = model(data, config['num_steps'])
+                for key, val in sub_results.items():
+                    if key in ['image']:
+                        continue
+                    val = val.data.cpu().numpy()
+                    if key not in  ['pres', 'order']:
+                        val = np.moveaxis(val, -3, -1)
+                    if key in results:
+                        results[key].append(val)
+                    else:
+                        results[key] = [val]
+            for key, val in results.items():
+                val = np.stack(val)
+                if key in results_all:
+                    results_all[key].append(val)
+                else:
+                    results_all[key] = [val]
+        results_all = {key: np.concatenate(val, axis=1) for key, val in results_all.items()}
+        with h5py.File(path_detail, 'w') as f:
+            for key, val in results_all.items():
+                f.create_dataset(key, data=val, compression='gzip')
+    return

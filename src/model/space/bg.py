@@ -9,7 +9,7 @@ from .arch import arch
 
 class SpaceBg(nn.Module):
     
-    def __init__(self):
+    def __init__(self, config):
         nn.Module.__init__(self)
         
         self.image_enc = ImageEncoderBg()
@@ -28,10 +28,12 @@ class SpaceBg(nn.Module):
         # Encode mask and image into component latents
         self.comp_encoder = CompEncoder()
         # Component decoder
-        if arch.K > 1:
-            self.comp_decoder = CompDecoder()
-        else:
+        if config['bg_dec'] == 'simple':
+            self.comp_decoder = CompDecoder(config)
+        elif config['bg_dec'] == 'strong':
             self.comp_decoder = CompDecoderStrong()
+        else:
+            raise AssertionError
 
         # ==== Prior related ====
         self.rnn_mask_prior = nn.LSTMCell(arch.z_mask_dim, arch.rnn_mask_prior_hidden_dim)
@@ -281,38 +283,44 @@ class MaskDecoder(nn.Module):
     
     def __init__(self):
         super(MaskDecoder, self).__init__()
+        if arch.img_shape == (128, 128):
+            stride_list = [4, 2, 4, 4]
+        elif arch.img_shape == (64, 64):
+            stride_list = [4, 2, 4, 2]
+        else:
+            raise AssertionError
         
         self.dec = nn.Sequential(
             nn.Conv2d(arch.z_mask_dim, 256, 1),
             nn.CELU(),
             nn.GroupNorm(16, 256),
-            
-            nn.Conv2d(256, 256 * 4 * 4, 1),
-            nn.PixelShuffle(4),
+
+            nn.Conv2d(256, 256 * stride_list[0] * stride_list[0], 1),
+            nn.PixelShuffle(stride_list[0]),
             nn.CELU(),
             nn.GroupNorm(16, 256),
             nn.Conv2d(256, 256, 3, 1, 1),
             nn.CELU(),
             nn.GroupNorm(16, 256),
-            
-            nn.Conv2d(256, 128 * 2 * 2, 1),
-            nn.PixelShuffle(2),
+
+            nn.Conv2d(256, 128 * stride_list[1] * stride_list[1], 1),
+            nn.PixelShuffle(stride_list[1]),
             nn.CELU(),
             nn.GroupNorm(16, 128),
             nn.Conv2d(128, 128, 3, 1, 1),
             nn.CELU(),
             nn.GroupNorm(16, 128),
-            
-            nn.Conv2d(128, 64 * 4 * 4, 1),
-            nn.PixelShuffle(4),
+
+            nn.Conv2d(128, 64 * stride_list[2] * stride_list[2], 1),
+            nn.PixelShuffle(stride_list[2]),
             nn.CELU(),
             nn.GroupNorm(8, 64),
             nn.Conv2d(64, 64, 3, 1, 1),
             nn.CELU(),
             nn.GroupNorm(8, 64),
-            
-            nn.Conv2d(64, 16 * 4 * 4, 1),
-            nn.PixelShuffle(4),
+
+            nn.Conv2d(64, 16 * stride_list[3] * stride_list[3], 1),
+            nn.PixelShuffle(stride_list[3]),
             nn.CELU(),
             nn.GroupNorm(4, 16),
             nn.Conv2d(16, 16, 3, 1, 1),
@@ -424,26 +432,25 @@ class CompDecoder(nn.Module):
     Decoder z_comp into component image
     """
     
-    def __init__(self):
+    def __init__(self, config):
         nn.Module.__init__(self)
         self.spatial_broadcast = SpatialBroadcast()
         # Input will be (B, L+2, H, W)
-        self.decoder = nn.Sequential(
+        num_layers = config['bg_num_layers']
+        self.padding = (num_layers + 1) * 2
+        net_list = [
             nn.Conv2d(arch.z_comp_dim + 2, 32, 3, 1),
             nn.BatchNorm2d(32),
             nn.ELU(),
-            nn.Conv2d(32, 32, 3, 1),
-            nn.BatchNorm2d(32),
-            nn.ELU(),
-            nn.Conv2d(32, 32, 3, 1),
-            nn.BatchNorm2d(32),
-            nn.ELU(),
-            nn.Conv2d(32, 32, 3, 1),
-            nn.BatchNorm2d(32),
-            nn.ELU(),
-            # 16x downsampled: (32, 4, 4)
-            nn.Conv2d(32, 3, 1, 1),
-        )
+        ]
+        for _ in range(num_layers):
+            net_list += [
+                nn.Conv2d(32, 32, 3, 1),
+                nn.BatchNorm2d(32),
+                nn.ELU(),
+            ]
+        net_list.append(nn.Conv2d(32, 3, 1, 1))
+        self.decoder = nn.Sequential(*net_list)
     
     def forward(self, z_comp):
         """
@@ -452,7 +459,7 @@ class CompDecoder(nn.Module):
         """
         h, w = arch.img_shape
         # (B, L) -> (B, L+2, H, W)
-        z_comp = self.spatial_broadcast(z_comp, h + 8, w + 8)
+        z_comp = self.spatial_broadcast(z_comp, h + self.padding, w + self.padding)
         # -> (B, 3, H, W)
         comp = self.decoder(z_comp)
         comp = torch.sigmoid(comp)
@@ -463,38 +470,44 @@ class CompDecoderStrong(nn.Module):
     
     def __init__(self):
         super(CompDecoderStrong, self).__init__()
+        if arch.img_shape == (128, 128):
+            stride_list = [4, 4, 2, 4]
+        elif arch.img_shape == (64, 64):
+            stride_list = [4, 4, 2, 2]
+        else:
+            raise AssertionError
         
         self.dec = nn.Sequential(
             nn.Conv2d(arch.z_comp_dim, 256, 1),
             nn.CELU(),
             nn.GroupNorm(16, 256),
             
-            nn.Conv2d(256, 256 * 4 * 4, 1),
-            nn.PixelShuffle(4),
+            nn.Conv2d(256, 256 * stride_list[0] * stride_list[0], 1),
+            nn.PixelShuffle(stride_list[0]),
             nn.CELU(),
             nn.GroupNorm(16, 256),
             nn.Conv2d(256, 256, 3, 1, 1),
             nn.CELU(),
             nn.GroupNorm(16, 256),
             
-            nn.Conv2d(256, 128 * 4 * 4, 1),
-            nn.PixelShuffle(4),
+            nn.Conv2d(256, 128 * stride_list[1] * stride_list[1], 1),
+            nn.PixelShuffle(stride_list[1]),
             nn.CELU(),
             nn.GroupNorm(16, 128),
             nn.Conv2d(128, 128, 3, 1, 1),
             nn.CELU(),
             nn.GroupNorm(16, 128),
             
-            nn.Conv2d(128, 64 * 2 * 2, 1),
-            nn.PixelShuffle(2),
+            nn.Conv2d(128, 64 * stride_list[2] * stride_list[2], 1),
+            nn.PixelShuffle(stride_list[2]),
             nn.CELU(),
             nn.GroupNorm(8, 64),
             nn.Conv2d(64, 64, 3, 1, 1),
             nn.CELU(),
             nn.GroupNorm(8, 64),
             
-            nn.Conv2d(64, 16 * 4 * 4, 1),
-            nn.PixelShuffle(4),
+            nn.Conv2d(64, 16 * stride_list[3] * stride_list[3], 1),
+            nn.PixelShuffle(stride_list[3]),
             nn.CELU(),
             nn.GroupNorm(4, 16),
             nn.Conv2d(16, 16, 3, 1, 1),

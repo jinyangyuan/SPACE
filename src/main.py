@@ -11,8 +11,8 @@ if __name__ == '__main__':
         'eval': eval,
         'show': show,
     }
-    cfg, task = get_config()
+    cfg, task, data_loaders, config = get_config()
     assert task in task_dict
-    task_dict[task](cfg)
+    task_dict[task](cfg, data_loaders, config)
 
 

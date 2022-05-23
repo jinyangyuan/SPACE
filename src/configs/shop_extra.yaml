@@ -1,0 +1,10 @@
+ckpt_intvl: 1000
+summ_image_count: 4
+
+batch_size: 16
+num_steps: 200000
+num_tests: 5
+seg_overlap: true
+
+bg_dec: simple
+bg_num_layers: 6

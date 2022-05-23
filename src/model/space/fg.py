@@ -150,7 +150,8 @@ class SpaceFg(nn.Module):
                                       inverse=True).view(B, arch.G ** 2, 1, *arch.img_shape)
         
         # Weighted sum, (B, 1, H, W)
-        alpha_map = (alpha_map * importance_map_full_res_norm).sum(dim=1)
+        mask_obj = alpha_map * importance_map_full_res_norm
+        alpha_map = mask_obj.sum(dim=1)
         
         # Everything is computed. Now let's compute loss
         # Compute KL divergences
@@ -230,7 +231,25 @@ class SpaceFg(nn.Module):
             (z_where.size() == (B, arch.G**2, 4)) and
             (z_what.size() == (B, arch.G**2, arch.z_what_dim))
         )
+
+        apc_full_res = spatial_transform(
+            o_att, z_where.view(B * arch.G ** 2, 4), (B * arch.G ** 2, 1, *arch.img_shape), inverse=True)
+        apc_full_res = apc_full_res.reshape(B, arch.G ** 2, *apc_full_res.shape[1:])
+        shp_full_res = spatial_transform(
+            alpha_att, z_where.view(B * arch.G ** 2, 4), (B * arch.G ** 2, 1, *arch.img_shape), inverse=True)
+        shp_full_res = shp_full_res.reshape(B, arch.G ** 2, *shp_full_res.shape[1:])
+        pres = torch.ge(z_pres.squeeze(-1), 0.5).to(torch.float)
+        order = -z_depth.squeeze(-1)
+        mask_bck = 1 - alpha_map[:, None]
+        mask = torch.cat([mask_obj, mask_bck], dim=1)
+
         log = {
+            'apc': apc_full_res,
+            'shp': shp_full_res,
+            'pres': pres,
+            'order': order,
+            'mask': mask,
+
             'fg': y_nobg,
             'z_what': z_what,
             'z_where': z_where,
@@ -268,26 +287,38 @@ class ImgEncoderFg(nn.Module):
         
         assert arch.G in [4, 8, 16]
         # Adjust stride such that the output dimension of the volume matches (G, G, ...)
-        last_stride = 2 if arch.G in [8, 4] else 1
-        second_to_last_stride = 2 if arch.G in [4] else 1
+        assert len(arch.img_shape) == 2
+        assert arch.img_shape[0] == arch.img_shape[1]
+        assert arch.img_shape[0] % arch.G == 0
+        scale = arch.img_shape[0] // arch.G
+        stride_list = []
+        for _ in range(5):
+            if scale == 1:
+                stride = 1
+            else:
+                assert scale % 2 == 0
+                scale //= 2
+                stride = 2
+            stride_list.append(stride)
+        assert scale == 1
         
         # Foreground Image Encoder in the paper
         # Encoder: (B, C, Himg, Wimg) -> (B, E, G, G)
         # G is H=W in the paper
         self.enc = nn.Sequential(
-            nn.Conv2d(3, 16, 4, 2, 1),
+            nn.Conv2d(3, 16, 4, stride_list[0], 1),
             nn.CELU(),
             nn.GroupNorm(4, 16),
-            nn.Conv2d(16, 32, 4, 2, 1),
+            nn.Conv2d(16, 32, 4, stride_list[1], 1),
             nn.CELU(),
             nn.GroupNorm(8, 32),
-            nn.Conv2d(32, 64, 4, 2, 1),
+            nn.Conv2d(32, 64, 4, stride_list[2], 1),
             nn.CELU(),
             nn.GroupNorm(8, 64),
-            nn.Conv2d(64, 128, 3, second_to_last_stride, 1),
+            nn.Conv2d(64, 128, 3, stride_list[3], 1),
             nn.CELU(),
             nn.GroupNorm(16, 128),
-            nn.Conv2d(128, 256, 3, last_stride, 1),
+            nn.Conv2d(128, 256, 3, stride_list[4], 1),
             nn.CELU(),
             nn.GroupNorm(32, 256),
             nn.Conv2d(256, arch.img_enc_dim_fg, 1),
@@ -429,27 +460,51 @@ class ZWhatEnc(nn.Module):
     
     def __init__(self):
         super(ZWhatEnc, self).__init__()
-        
-        self.enc_cnn = nn.Sequential(
-            nn.Conv2d(3, 16, 3, 1, 1),
-            nn.CELU(),
-            nn.GroupNorm(4, 16),
-            nn.Conv2d(16, 32, 4, 2, 1),
-            nn.CELU(),
-            nn.GroupNorm(8, 32),
-            nn.Conv2d(32, 32, 3, 1, 1),
-            nn.CELU(),
-            nn.GroupNorm(4, 32),
-            nn.Conv2d(32, 64, 4, 2, 1),
-            nn.CELU(),
-            nn.GroupNorm(8, 64),
-            nn.Conv2d(64, 128, 4, 2, 1),
-            nn.CELU(),
-            nn.GroupNorm(8, 128),
-            nn.Conv2d(128, 256, 4),
-            nn.CELU(),
-            nn.GroupNorm(16, 256),
-        )
+
+        if arch.glimpse_size == 32:
+            self.enc_cnn = nn.Sequential(
+                nn.Conv2d(3, 16, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(4, 16),
+                nn.Conv2d(16, 32, 4, 2, 1),
+                nn.CELU(),
+                nn.GroupNorm(8, 32),
+                nn.Conv2d(32, 32, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(4, 32),
+                nn.Conv2d(32, 64, 4, 2, 1),
+                nn.CELU(),
+                nn.GroupNorm(8, 64),
+                nn.Conv2d(64, 128, 4, 2, 1),
+                nn.CELU(),
+                nn.GroupNorm(8, 128),
+                nn.Conv2d(128, 256, 4),
+                nn.CELU(),
+                nn.GroupNorm(16, 256),
+            )
+        elif arch.glimpse_size == 64:
+            self.enc_cnn = nn.Sequential(
+                nn.Conv2d(3, 16, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(4, 16),
+                nn.Conv2d(16, 32, 4, 2, 1),
+                nn.CELU(),
+                nn.GroupNorm(8, 32),
+                nn.Conv2d(32, 32, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(4, 32),
+                nn.Conv2d(32, 64, 4, 2, 1),
+                nn.CELU(),
+                nn.GroupNorm(8, 64),
+                nn.Conv2d(64, 128, 4, 2, 1),
+                nn.CELU(),
+                nn.GroupNorm(8, 128),
+                nn.Conv2d(128, 256, 8),
+                nn.CELU(),
+                nn.GroupNorm(16, 256),
+            )
+        else:
+            raise AssertionError
         
         self.enc_what = nn.Linear(256, arch.z_what_dim * 2)
     
@@ -480,51 +535,100 @@ class GlimpseDec(nn.Module):
         super(GlimpseDec, self).__init__()
         
         # I am using really deep network here. But this is overkill
-        self.dec = nn.Sequential(
-            nn.Conv2d(arch.z_what_dim, 256, 1),
-            nn.CELU(),
-            nn.GroupNorm(16, 256),
-            
-            nn.Conv2d(256, 128 * 2 * 2, 1),
-            nn.PixelShuffle(2),
-            nn.CELU(),
-            nn.GroupNorm(16, 128),
-            nn.Conv2d(128, 128, 3, 1, 1),
-            nn.CELU(),
-            nn.GroupNorm(16, 128),
-            
-            nn.Conv2d(128, 128 * 2 * 2, 1),
-            nn.PixelShuffle(2),
-            nn.CELU(),
-            nn.GroupNorm(16, 128),
-            nn.Conv2d(128, 128, 3, 1, 1),
-            nn.CELU(),
-            nn.GroupNorm(16, 128),
-            
-            nn.Conv2d(128, 64 * 2 * 2, 1),
-            nn.PixelShuffle(2),
-            nn.CELU(),
-            nn.GroupNorm(8, 64),
-            nn.Conv2d(64, 64, 3, 1, 1),
-            nn.CELU(),
-            nn.GroupNorm(8, 64),
-            
-            nn.Conv2d(64, 32 * 2 * 2, 1),
-            nn.PixelShuffle(2),
-            nn.CELU(),
-            nn.GroupNorm(8, 32),
-            nn.Conv2d(32, 32, 3, 1, 1),
-            nn.CELU(),
-            nn.GroupNorm(8, 32),
-            
-            nn.Conv2d(32, 16 * 2 * 2, 1),
-            nn.PixelShuffle(2),
-            nn.CELU(),
-            nn.GroupNorm(4, 16),
-            nn.Conv2d(16, 16, 3, 1, 1),
-            nn.CELU(),
-            nn.GroupNorm(4, 16),
-        )
+        if arch.glimpse_size == 32:
+            self.dec = nn.Sequential(
+                nn.Conv2d(arch.z_what_dim, 256, 1),
+                nn.CELU(),
+                nn.GroupNorm(16, 256),
+
+                nn.Conv2d(256, 128 * 2 * 2, 1),
+                nn.PixelShuffle(2),
+                nn.CELU(),
+                nn.GroupNorm(16, 128),
+                nn.Conv2d(128, 128, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(16, 128),
+
+                nn.Conv2d(128, 128 * 2 * 2, 1),
+                nn.PixelShuffle(2),
+                nn.CELU(),
+                nn.GroupNorm(16, 128),
+                nn.Conv2d(128, 128, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(16, 128),
+
+                nn.Conv2d(128, 64 * 2 * 2, 1),
+                nn.PixelShuffle(2),
+                nn.CELU(),
+                nn.GroupNorm(8, 64),
+                nn.Conv2d(64, 64, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(8, 64),
+
+                nn.Conv2d(64, 32 * 2 * 2, 1),
+                nn.PixelShuffle(2),
+                nn.CELU(),
+                nn.GroupNorm(8, 32),
+                nn.Conv2d(32, 32, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(8, 32),
+
+                nn.Conv2d(32, 16 * 2 * 2, 1),
+                nn.PixelShuffle(2),
+                nn.CELU(),
+                nn.GroupNorm(4, 16),
+                nn.Conv2d(16, 16, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(4, 16),
+            )
+        elif arch.glimpse_size == 64:
+            self.dec = nn.Sequential(
+                nn.Conv2d(arch.z_what_dim, 256, 1),
+                nn.CELU(),
+                nn.GroupNorm(16, 256),
+
+                nn.Conv2d(256, 128 * 4 * 4, 1),
+                nn.PixelShuffle(4),
+                nn.CELU(),
+                nn.GroupNorm(16, 128),
+                nn.Conv2d(128, 128, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(16, 128),
+
+                nn.Conv2d(128, 128 * 2 * 2, 1),
+                nn.PixelShuffle(2),
+                nn.CELU(),
+                nn.GroupNorm(16, 128),
+                nn.Conv2d(128, 128, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(16, 128),
+
+                nn.Conv2d(128, 64 * 2 * 2, 1),
+                nn.PixelShuffle(2),
+                nn.CELU(),
+                nn.GroupNorm(8, 64),
+                nn.Conv2d(64, 64, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(8, 64),
+
+                nn.Conv2d(64, 32 * 2 * 2, 1),
+                nn.PixelShuffle(2),
+                nn.CELU(),
+                nn.GroupNorm(8, 32),
+                nn.Conv2d(32, 32, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(8, 32),
+
+                nn.Conv2d(32, 16 * 2 * 2, 1),
+                nn.PixelShuffle(2),
+                nn.CELU(),
+                nn.GroupNorm(4, 16),
+                nn.Conv2d(16, 16, 3, 1, 1),
+                nn.CELU(),
+                nn.GroupNorm(4, 16),
+            )
+        else:
+            raise AssertionError
         
         self.dec_o = nn.Conv2d(16, 3, 3, 1, 1)
         
