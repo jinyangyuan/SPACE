@@ -285,7 +285,7 @@ class ImgEncoderFg(nn.Module):
     def __init__(self):
         super(ImgEncoderFg, self).__init__()
         
-        assert arch.G in [4, 8, 16]
+        # assert arch.G in [4, 8, 16]
         # Adjust stride such that the output dimension of the volume matches (G, G, ...)
         assert len(arch.img_shape) == 2
         assert arch.img_shape[0] == arch.img_shape[1]
@@ -300,7 +300,13 @@ class ImgEncoderFg(nn.Module):
                 scale //= 2
                 stride = 2
             stride_list.append(stride)
+        for idx in range(5):
+            if scale != 1:
+                assert scale % 2 == 0
+                scale //= 2
+                stride_list[idx] *= 2
         assert scale == 1
+        print(stride_list)
         
         # Foreground Image Encoder in the paper
         # Encoder: (B, C, Himg, Wimg) -> (B, E, G, G)
