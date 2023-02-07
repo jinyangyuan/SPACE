@@ -24,7 +24,7 @@ function test {
 folder_data='../../compositional-scene-representation-datasets'
 run_file='main.py'
 
-for name in 'mnist' 'dsprites' 'clevr' 'shop'; do
+for name in 'mnist' 'dsprites' 'abstract' 'clevr' 'shop' 'gso'; do
     path_config='configs/'$name'.yaml'
     path_config_extra='configs/'$name'_extra.yaml'
     path_data=$folder_data'/'$name'.h5'
